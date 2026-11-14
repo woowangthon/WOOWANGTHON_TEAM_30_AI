@@ -23,10 +23,10 @@
 | [`server/app/ai/llm.py`](https://github.com/woowangthon/WOOWANGTHON_TEAM_30_BE/blob/main/server/app/ai/llm.py) | 질문 의도 파악, 녹음 클립 고르기, 주제 붙이기, 말투 카드, 기억 대화 답장, 내용으로 화자 나누기 | 외부 API 호출 (**배포: NOVA → `claude-haiku-5-5`**, Claude·OpenAI·Gemini) + 직접 만든 프롬프트·규칙 대체 |
 | [`server/app/ai/embedding.py`](https://github.com/woowangthon/WOOWANGTHON_TEAM_30_BE/blob/main/server/app/ai/embedding.py) | 의미 검색용 벡터 | 외부 API 호출 |
 | [`server/app/ai/guard.py`](https://github.com/woowangthon/WOOWANGTHON_TEAM_30_BE/blob/main/server/app/ai/guard.py) | **AI 출력 검증(옛 검색형 대화)**: 후보에 없는 클립, 지어낸 인용, 형식이 틀린 응답을 버림 | 직접 구현 |
-| [`server/app/ai/registry.py`](https://github.com/woowangthon/WOOWANGTHON_TEAM_30_BE/blob/main/server/app/ai/registry.py) | 키·동의 여부에 따라 공급자 선택, 실패하면 규칙 기반(mock)으로 대체 | 직접 구현 |
+| [`server/app/ai/registry.py`](https://github.com/woowangthon/WOOWANGTHON_TEAM_30_BE/blob/main/server/app/ai/registry.py) | 키·동의 여부에 따라 공급자 선택(키가 없으면 규칙 기반 mock). 호출 실패 때의 동작은 단계마다 다름(아래 '한계') | 직접 구현 |
 | [`server/app/search/`](https://github.com/woowangthon/WOOWANGTHON_TEAM_30_BE/tree/main/server/app/search) | 한국어 토크나이저, BM25 검색, 사투리 정규화 사전 | 직접 구현 |
 | [`server/app/care/crisis.py`](https://github.com/woowangthon/WOOWANGTHON_TEAM_30_BE/blob/main/server/app/care/crisis.py) | 자살·자해 위험 신호 감지 → 상담 번호 안내 | 직접 구현 |
-| [`server/app/services/talk.py`](https://github.com/woowangthon/WOOWANGTHON_TEAM_30_BE/blob/main/server/app/services/talk.py) | **기억 대화**(지금 화면): 위기 → 금지 주제 → 원본 녹음 → AI가 만든 답(근거 필수) | 직접 구현 |
+| [`server/app/services/talk.py`](https://github.com/woowangthon/WOOWANGTHON_TEAM_30_BE/blob/main/server/app/services/talk.py) | **기억 대화**(지금 화면): 위기(규칙) → 금지 주제 → LLM 답장 + 위험도(규칙보다 높으면 위기 전환) → 원본 녹음 또는 AI가 만든 답(근거 필수, 사실·조언은 관련 녹음 필수) → LLM 실패 시 안내 | 직접 구현 |
 | [`server/app/services/persona.py`](https://github.com/woowangthon/WOOWANGTHON_TEAM_30_BE/blob/main/server/app/services/persona.py) | 그분 녹음 전체에서 말투 카드 만들기·캐시 | 직접 구현 + LLM 호출 |
 | [`server/app/services/chat.py`](https://github.com/woowangthon/WOOWANGTHON_TEAM_30_BE/blob/main/server/app/services/chat.py) | 11/9 원본 기반 대화(클립 카드 고르기). API만 남음 | 직접 구현 |
 | [`server/app/eval.py`](https://github.com/woowangthon/WOOWANGTHON_TEAM_30_BE/blob/main/server/app/eval.py) | 골든 세트 검색 평가 | 직접 구현 |
@@ -96,4 +96,4 @@ cd server && python -m app.eval_talk --live https://yeoun-team30-api.onrender.co
 - 위기 신호 감지는 규칙 기반이라 돌려 말한 표현을 놓칠 수 있습니다(규칙만으로는 처음 보는 표현 10개 중 0, 답장 LLM의 위험도를 더해 10/10). 놓치는 것보다 한 번 더 안내하는 쪽으로 넓게 잡았습니다.
 - AI가 만든 답은 근거 녹음이 꼭 붙지만, 답의 내용이 근거와 맞는지는 서버가 검사하지 않습니다(보강 뒤 10개 중 가벼운 표현 2개).
 - 그분 목소리 합성은 하지 않습니다. 음성 복제 서비스가 유료라 이번 제출에서 뺐습니다.
-- 외부 API 키가 없거나 호출이 실패하면 규칙 기반(mock)으로 대체됩니다. 응답마다 어느 방식으로 골랐는지(`picker`)가 함께 남습니다.
+- 외부 API 키가 없으면 규칙 기반(mock)으로 동작합니다. 키가 있는데 호출이 실패하면 단계마다 다릅니다: 받아쓰기는 그 자료 처리가 실패로 끝나 다시 시도해야 하고, 화자 분리·내용으로 나누기는 나누지 않은 채 사람이 고르며, 태그는 규칙 태그, 임베딩은 낱말 검색만, 기억 대화는 "지금은 답장을 만들 수 없어서…" 안내로 끝납니다. 기억 대화 응답에는 어느 방식으로 답했는지(`provider`)가 함께 남습니다.
