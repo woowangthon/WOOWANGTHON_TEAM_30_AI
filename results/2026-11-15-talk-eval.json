@@ -688,5 +688,5 @@
       }
     ]
   },
-  "note": "2026-11-15 00시 배포본(BE main da773d6) 샘플 공간, NOVA claude-haiku-5-5. human_judgement는 상혁 쪽(Claude Code)이 답장과 근거 녹음을 읽고 붙인 판정."
+  "note": "보강 전 2회차(11/15 0시쯤). 배포본 BE da773d6 샘플 공간, NOVA claude-haiku-5-5. 골든 기대 녹음 29/30. human_judgement는 상혁 쪽(Claude Code)이 답장과 근거 녹음을 읽고 붙인 판정. 1회차는 2026-11-14-talk-eval-run1.json."
 }
