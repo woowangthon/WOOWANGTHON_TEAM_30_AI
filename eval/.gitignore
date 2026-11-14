@@ -1,0 +1,15 @@
+# 음성 파일과 실행 결과는 커밋하지 않는다 (팀원 본인 녹음이라도 저장소에 올리지 않는다)
+out/
+output/
+results/
+*.wav
+*.mp3
+*.m4a
+*.ogg
+*.flac
+*.aac
+*.opus
+*.webm
+*.pcm
+*.safetensors
+__pycache__/
