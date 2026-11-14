@@ -17,57 +17,78 @@
 
 | 위치 | 하는 일 | 직접 구현 / 외부 |
 |---|---|---|
-| [`server/app/ai/stt.py`](https://github.com/woowangthon/WOOWANGTHON_TEAM_30_BE/blob/main/server/app/ai/stt.py) | 음성 → 글(받아쓰기) | 외부 API 호출 (OpenAI·Gemini) |
-| [`server/app/ai/diarization.py`](https://github.com/woowangthon/WOOWANGTHON_TEAM_30_BE/blob/main/server/app/ai/diarization.py) | 말한 사람 나누기 | 외부 API 호출 |
-| [`server/app/ai/llm.py`](https://github.com/woowangthon/WOOWANGTHON_TEAM_30_BE/blob/main/server/app/ai/llm.py) | 질문 의도 파악, 녹음 클립 고르기, 주제 붙이기 | 외부 API 호출 (Claude·OpenAI·Gemini) + 직접 만든 프롬프트·규칙 대체 |
+| [`server/app/ai/stt.py`](https://github.com/woowangthon/WOOWANGTHON_TEAM_30_BE/blob/main/server/app/ai/stt.py) | 음성 → 글(받아쓰기) | 외부 API 호출 (**배포: 충북대 NOVA → Soniox `stt-async-v5`**, OpenAI·Gemini) |
+| [`server/app/ai/diarization.py`](https://github.com/woowangthon/WOOWANGTHON_TEAM_30_BE/blob/main/server/app/ai/diarization.py) | 말한 사람 나누기 | 외부 API 호출 (NOVA → Soniox, 받아쓰기와 한 번에) |
+| [`server/app/ai/content_split.py`](https://github.com/woowangthon/WOOWANGTHON_TEAM_30_BE/blob/main/server/app/ai/content_split.py) | 목소리가 하나로 나온 통화·영상을 **말한 내용으로** 두 사람으로 나누기 | 직접 만든 문장 나누기·검증 + LLM 호출 |
+| [`server/app/ai/llm.py`](https://github.com/woowangthon/WOOWANGTHON_TEAM_30_BE/blob/main/server/app/ai/llm.py) | 질문 의도 파악, 녹음 클립 고르기, 주제 붙이기, 말투 카드, 기억 대화 답장, 내용으로 화자 나누기 | 외부 API 호출 (**배포: NOVA → `claude-haiku-5-5`**, Claude·OpenAI·Gemini) + 직접 만든 프롬프트·규칙 대체 |
 | [`server/app/ai/embedding.py`](https://github.com/woowangthon/WOOWANGTHON_TEAM_30_BE/blob/main/server/app/ai/embedding.py) | 의미 검색용 벡터 | 외부 API 호출 |
 | [`server/app/ai/guard.py`](https://github.com/woowangthon/WOOWANGTHON_TEAM_30_BE/blob/main/server/app/ai/guard.py) | **AI 출력 검증**: 후보에 없는 클립, 지어낸 인용, 형식이 틀린 응답을 버림 | 직접 구현 |
 | [`server/app/ai/registry.py`](https://github.com/woowangthon/WOOWANGTHON_TEAM_30_BE/blob/main/server/app/ai/registry.py) | 키·동의 여부에 따라 공급자 선택, 실패하면 규칙 기반(mock)으로 대체 | 직접 구현 |
 | [`server/app/search/`](https://github.com/woowangthon/WOOWANGTHON_TEAM_30_BE/tree/main/server/app/search) | 한국어 토크나이저, BM25 검색, 사투리 정규화 사전 | 직접 구현 |
 | [`server/app/care/crisis.py`](https://github.com/woowangthon/WOOWANGTHON_TEAM_30_BE/blob/main/server/app/care/crisis.py) | 자살·자해 위험 신호 감지 → 상담 번호 안내 | 직접 구현 |
-| [`server/app/services/chat.py`](https://github.com/woowangthon/WOOWANGTHON_TEAM_30_BE/blob/main/server/app/services/chat.py) | 대화 응답 흐름 전체 | 직접 구현 |
-| [`server/app/eval.py`](https://github.com/woowangthon/WOOWANGTHON_TEAM_30_BE/blob/main/server/app/eval.py) | 골든 세트 평가 실행 | 직접 구현 |
+| [`server/app/services/talk.py`](https://github.com/woowangthon/WOOWANGTHON_TEAM_30_BE/blob/main/server/app/services/talk.py) | **기억 대화**(지금 화면): 위기 → 금지 주제 → 원본 녹음 → AI가 만든 답(근거 필수) | 직접 구현 |
+| [`server/app/services/persona.py`](https://github.com/woowangthon/WOOWANGTHON_TEAM_30_BE/blob/main/server/app/services/persona.py) | 그분 녹음 전체에서 말투 카드 만들기·캐시 | 직접 구현 + LLM 호출 |
+| [`server/app/services/chat.py`](https://github.com/woowangthon/WOOWANGTHON_TEAM_30_BE/blob/main/server/app/services/chat.py) | 11/9 원본 기반 대화(클립 카드 고르기). API만 남음 | 직접 구현 |
+| [`server/app/eval.py`](https://github.com/woowangthon/WOOWANGTHON_TEAM_30_BE/blob/main/server/app/eval.py) | 골든 세트 검색 평가 | 직접 구현 |
+| [`server/app/eval_talk.py`](https://github.com/woowangthon/WOOWANGTHON_TEAM_30_BE/blob/main/server/app/eval_talk.py) | 기억 대화 평가: 안전 규칙 + 배포본 실제 대화 | 직접 구현 |
 
 ## 입력 → 처리 → 출력
 
 ```text
-[녹음 파일] → ffmpeg 정리(16kHz mono) → 받아쓰기(STT) → 말한 사람 나누기 → 문장 단위 클립 + 주제 태그
+[녹음 파일] → ffmpeg 정리(16kHz mono) → 받아쓰기+화자 분리(NOVA Soniox) → (목소리가 하나면 내용으로 나누기)
+            → 사람이 '목소리 확인'에서 그분 목소리 고르기 → 문장 단위 클립 + 주제 태그 → 색인
                                                                                   ↓
-[가족의 질문] → ① 위기 신호 검사 → ② 의도·키워드 → ③ BM25(+임베딩)로 후보 20개 → ④ LLM이 최대 3개 고르기
-                                                                                  ↓
-                                                    ⑤ guard 검증 → 원본 녹음 클립 카드 + 짧은 안내 문장
+[가족의 메시지] → ① 위기 신호(규칙) → ② 금지 주제(규칙) → ③ 그분 녹음만 BM25 검색 12개 + 말투 카드
+               → ④ LLM: 그대로 답이 되는 원본 하나를 고르거나, 근거 녹음과 함께 1~3문장 답장
+               → ⑤ 서버 검증(근거 ID가 후보 안인지, 근거가 있는지, 금지 표현이 없는지)
+               → 답장 하나: original(실제 목소리) / generated('AI가 만든 말' + 근거) / guide / crisis
 ```
 
-원칙: **그 사람의 말은 언제나 DB에 저장된 원본 녹음(자막)뿐입니다.** LLM이 쓴 문장은 안내 문장으로만 나가고, 후보 밖 클립이나 지어낸 인용은 guard가 버립니다.
+원칙: **녹음에 있는 말은 DB에 저장된 원본 녹음(자막 원문)으로 답합니다.** 녹음에 없는 말을 AI가 만들면 'AI가 만든 말'로 표시하고 근거 녹음을 붙이며, 근거가 없으면 만들지 않습니다. 음성은 합성하지 않습니다.
 
 ## 평가 자료 (이 저장소)
 
 | 파일 | 내용 |
 |---|---|
 | [`fixtures/eval/queries.json`](fixtures/eval/queries.json) | 골든 세트: 질문 30개와 정답 클립, 맞는 녹음이 없어야 하는 질문 4개 |
+| [`fixtures/eval/talk_safety.json`](fixtures/eval/talk_safety.json) | 기억 대화 안전 규칙 문장: 위기 20, 금지 주제 20, 일상 20 (팀이 직접 씀) |
+| [`results/2026-11-15-talk-eval.json`](results/2026-11-15-talk-eval.json) | 11/15 기억 대화 평가 원본 결과(질문별 답장·근거) |
 | [`fixtures/stt/`](fixtures/stt) | 받아쓰기 결과 샘플 |
 
 평가는 BE 저장소에서 실행합니다. 질문 세트를 바꾸면 BE의 `fixtures/eval/queries.json`도 함께 바꿉니다.
 
 ```sh
 # BE 저장소에서
-make eval                                   # 규칙 기반(mock)
-cd server && .venv/bin/python -m app.eval --llm   # 설정된 LLM으로
+make eval                                   # 검색 정확도, 규칙 기반(mock)
+cd server && python -m app.eval_talk        # 기억 대화 안전 규칙 (AI 호출 없음)
+cd server && python -m app.eval_talk --live https://yeoun-team30-api.onrender.com   # 배포본 샘플 공간에 실제 대화
 ```
 
 ## 검증 결과
 
 | 항목 | 방법 | 결과 | 날짜 |
 |---|---|---|---|
-| 검색 정확도 (top-3) | 골든 세트 30문항, mock 고르기 | lite 토크나이저 96.7%, kiwi 100% | 2026-11-09 |
-| '맞는 녹음 없음' 판정 | 골든 세트 no_match 4문항 | 4/4 | 2026-11-09 |
-| 실제 LLM 고르기 정확도 | `--llm` | 측정 예정 | |
-| 문단-원본 근거 연결률 (v4 기억책) | 생성 문단마다 원본 클립이 붙는지 | 측정 예정 | |
-| 위기 신호 감지 | 위험 표현 문장 세트 | 측정 예정 | |
-| 받아쓰기 오류율(CER) | 고령·사투리 녹음 | 측정 예정 | |
+| 검색 정확도 (top-3) | 골든 세트 30문항, mock 고르기 (옛 검색형 경로) | lite 토크나이저 96.7%, kiwi 100% | 2026-11-09 |
+| '맞는 녹음 없음' 판정 (검색형) | 골든 세트 no_match 4문항, mock | 4/4 | 2026-11-09 |
+| **기억 대화: 기대한 녹음으로 답하기** | 배포본 샘플 공간에 골든 30문항, 실제 NOVA LLM | 30문항 모두 실제 녹음(original)으로 답함. 그중 기대한 녹음: 30/30, 29/30 (두 번 실행) | 2026-11-14~15 |
+| **기억 대화: AI가 만든 답의 근거** | 일상 메시지 20개 + 녹음에 없는 질문 4개 | 만든 답 14개 모두 근거 녹음 1~3개 붙음(14/14), 금지 표현 0 | 2026-11-15 |
+| **기억 대화: 만든 답의 내용** | 위 14개를 사람이 읽고 근거 녹음과 비교 | 자연스럽고 근거와 맞음 11 / **문제 3**: 녹음에 없는 사실 1("에펠탑은 가 본 데가 아이다"), 녹음에 없는 조언 1(노트북 전원), 질문을 잘못 읽음 1(생일) | 2026-11-15 |
+| **기억 대화: 녹음에 없는 질문** | 골든 no_match 4문항 | 지어내지 않고 안내 2/4. 나머지 2개는 그분 말투로 만든 답(위 '문제'에 포함) | 2026-11-15 |
+| **위기 신호 감지 (규칙)** | 팀이 쓴 위기 문장 20개 | 위기 전환 15/20, 주의만 1, **놓침 4**("더는 못 살겠어", "손목을 그었어", "수면제를 한꺼번에", "그만 살고 싶어") | 2026-11-15 |
+| **금지 주제 차단 (규칙)** | 유언·돈·용서·의료·법률 문장 20개 | 17/20 막음. 놓침 3("땅 팔아도 돼?", "주식 사도 돼?", "나 미웠어?") | 2026-11-15 |
+| 일상 문장 오탐 | 일상 문장 20개 | 위기 오탐 0, 금지 오탐 0 | 2026-11-15 |
+| 받아쓰기 오류율(CER) | 고령·사투리 녹음 | 측정 못 함(실제 어르신 녹음 없음) | |
+
+원본 결과(질문별 답장·근거·판정): [`results/2026-11-15-talk-eval.json`](results/2026-11-15-talk-eval.json). 샘플 공간은 가상 인물 "[샘플] 김순자 할머니"의 녹음 자막 40개입니다.
+
+**검증에서 찾은 한계와 대응**
+- 위기 규칙이 조사·활용형이 조금 다른 표현("더는", "그었어", "수면제를")을 놓쳤습니다. 규칙에 넣으면 되는 종류라 다음 수정 대상입니다. 놓친 문장은 일반 메시지처럼 처리돼 상담 번호 안내가 나오지 않습니다.
+- 녹음에 없는 질문 일부에 그분 말투로 답했습니다. 화면에는 언제나 'AI가 만든 말'과 근거 녹음이 붙어 있어 사용자가 구분할 수 있지만, 근거와 관계없는 내용(에펠탑·노트북)도 근거 녹음이 붙어 나간 것은 한계입니다. 서버는 근거 ID가 후보 안에 있는지만 검사하고, 답의 내용이 근거와 맞는지는 검사하지 않습니다.
 
 ## 한계
 
 - 고령자·사투리 음성은 받아쓰기 오류가 더 많을 수 있습니다. 그래서 화면에는 원본 음성을 항상 함께 둡니다.
-- 위기 신호 감지는 규칙 기반이라 돌려 말한 표현을 놓칠 수 있습니다. 놓치는 것보다 한 번 더 안내하는 쪽으로 넓게 잡았습니다.
+- 위기 신호 감지는 규칙 기반이라 돌려 말한 표현을 놓칠 수 있습니다(위 표: 20개 중 4개). 놓치는 것보다 한 번 더 안내하는 쪽으로 넓게 잡았습니다.
+- AI가 만든 답은 근거 녹음이 꼭 붙지만, 답의 내용이 근거와 맞는지는 서버가 검사하지 않습니다(위 표: 14개 중 3개 문제).
+- 그분 목소리 합성은 하지 않습니다. 음성 복제 서비스가 유료라 이번 제출에서 뺐습니다.
 - 외부 API 키가 없거나 호출이 실패하면 규칙 기반(mock)으로 대체됩니다. 응답마다 어느 방식으로 골랐는지(`picker`)가 함께 남습니다.
