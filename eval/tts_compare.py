@@ -18,6 +18,7 @@
 
 import argparse
 import base64
+import http.client
 import json
 import mimetypes
 import os
@@ -102,6 +103,13 @@ CHATTERBOX_MAX_CHARS = 300
 # 실패 시 응답 필드 error, error_type.   출처 https://fal.ai/docs/model-apis/model-endpoints/queue
 STATUS_COMPLETED = "COMPLETED"
 
+# 취소: PUT cancel_url. 응답 200 {"status":"OK"}, 202 {"status":"CANCELLATION_REQUESTED"},
+#   400 {"status":"ALREADY_COMPLETED"}, 404 {"status":"NOT_FOUND"}.
+#   출처 https://fal.ai/docs/model-apis/model-endpoints/queue (3차 지시에서 전달받은 값이며 research.md 에는 이 응답 코드 줄이 없다).
+#   200·202 는 취소 요청 성공, 400(ALREADY_COMPLETED)은 "이미 끝남"으로 보고 경고 없이 삭제를 시도한다.
+CANCEL_OK_CODES = (200, 202)
+CANCEL_ALREADY_COMPLETED_CODE = 400
+
 POLL_INTERVAL_S = 0.5      # 우리가 정한 값
 POLL_TIMEOUT_S = 600       # 우리가 정한 값
 HTTP_TIMEOUT_S = 120       # 우리가 정한 값
@@ -123,6 +131,7 @@ EXIT_OK = 0
 EXIT_INPUT_ERROR = 1
 EXIT_KEY_NEEDED = 2
 EXIT_RUN_FAILED = 3
+EXIT_INTERRUPTED = 130
 
 AUDIO_MIME = {
     ".wav": "audio/wav",
@@ -299,27 +308,38 @@ def describe_plan():
 # fal 호출 (네트워크)
 # --------------------------------------------------------------------------
 
+def exc_code(exc):
+    """예상 밖 예외를 짧은 오류 코드로 바꾼다 (예외 메시지는 쓰지 않는다)."""
+    if isinstance(exc, (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException)):
+        return "NETWORK"
+    return "ERROR_" + safe_code(type(exc).__name__)
+
+
 def http_call(method, url, headers, body=None, timeout=HTTP_TIMEOUT_S):
-    """(상태코드, 바이트, 응답헤더)를 돌려준다. 네트워크 실패는 StepError('NETWORK')."""
-    data = None if body is None else json.dumps(body).encode("utf-8")
-    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    """(상태코드, 바이트, 응답헤더)를 돌려준다. 네트워크·읽기·조립 중 어떤 예외든(KeyboardInterrupt 제외)
+    StepError 로 바꾼다 (예: http.client.IncompleteRead -> NETWORK)."""
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.status, resp.read(), resp.headers
-    except urllib.error.HTTPError as e:
+        data = None if body is None else json.dumps(body).encode("utf-8")
+        req = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
-            payload = e.read()
-        except Exception:
-            payload = b""
-        return e.code, payload, e.headers
-    except (urllib.error.URLError, TimeoutError, OSError):
-        raise StepError("NETWORK")
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return resp.status, resp.read(), resp.headers
+        except urllib.error.HTTPError as e:
+            try:
+                payload = e.read()
+            except Exception:
+                payload = b""
+            return e.code, payload, e.headers
+    except StepError:
+        raise
+    except Exception as e:
+        raise StepError(exc_code(e))
 
 
 def parse_json(raw):
     try:
         return json.loads(raw.decode("utf-8"))
-    except (ValueError, UnicodeDecodeError):
+    except Exception:  # JSON 오류·디코드 오류 등
         return None
 
 
@@ -331,19 +351,22 @@ def safe_code(text, fallback="UNKNOWN"):
     return cleaned or fallback
 
 
-def run_queue(endpoint, body, headers, key):
+def run_queue(endpoint, body, headers, key, state=None):
     """큐 방식 호출. (결과 JSON, request_id, 첫 응답까지 초)를 돌려준다. 실패 시 StepError(code) 이며
     request_id 를 알고 있으면 e.request_id 에 담는다. 완료 전에 시간 초과·오류로 끝나면 cancel_url 로 취소를 시도한다."""
     t0 = time.perf_counter()
     status, raw, _ = http_call("POST", QUEUE_BASE + endpoint, headers, body)
     sub = parse_json(raw)
-    if status != 200 or not isinstance(sub, dict):
+    # 미확인: 제출 응답 코드는 문서에서 확인하지 못했다 -> 200 만 받지 않고 2xx 를 성공으로 본다.
+    if not (200 <= status < 300) or not isinstance(sub, dict):
         raise StepError("HTTP_%d" % status)
     request_id = sub.get("request_id")
     status_url, response_url = sub.get("status_url"), sub.get("response_url")
     cancel_url = sub.get("cancel_url")
     if not (request_id and status_url and response_url):
         raise StepError("BAD_SUBMIT_RESPONSE")
+    if state is not None:
+        state["ids"].append(request_id)  # 어떤 일이 생겨도 끝에서 삭제를 시도할 수 있게 바로 기록
     query_headers = build_query_headers(key)
     completed = False
     try:
@@ -373,6 +396,16 @@ def run_queue(endpoint, body, headers, key):
         if not completed:
             cancel_request(cancel_url, key)
         raise
+    except KeyboardInterrupt:
+        if not completed:
+            cancel_request(cancel_url, key)
+        raise
+    except Exception as e:  # 예상 밖 예외도 StepError 로 바꿔 정리·저장이 이어지게 한다
+        err = StepError(exc_code(e))
+        err.request_id = request_id
+        if not completed:
+            cancel_request(cancel_url, key)
+        raise err
     return result, request_id, first
 
 
@@ -386,10 +419,12 @@ def cancel_request(cancel_url, key):
     except StepError:
         print("경고: 취소 호출 실패(NETWORK).", file=sys.stderr)
         return False
-    if code != 200:
-        print("경고: 취소 호출 실패(HTTP_%d)." % code, file=sys.stderr)
-        return False
-    return True
+    if code in CANCEL_OK_CODES:
+        return True
+    if code == CANCEL_ALREADY_COMPLETED_CODE:
+        return True  # 이미 끝남(ALREADY_COMPLETED): 경고 없이 이어서 삭제를 시도한다
+    print("경고: 취소 호출 실패(HTTP_%d)." % code, file=sys.stderr)
+    return False
 
 
 def download(url):
@@ -429,14 +464,14 @@ def pick_extension(ctype, file_info):
     return ".bin"
 
 
-def synth_one(model, endpoint, body, headers, key, out_dir, number):
-    """한 문장 합성. 결과 행(dict)을 돌려준다. 오류는 error 코드로만 기록한다."""
+def synth_one(model, endpoint, body, headers, key, out_dir, number, report, state):
+    """한 문장 합성. 결과 행을 report["results"] 에 바로 기록한다. 오류는 error 코드로만 기록한다."""
     row = {"model": model, "sentence_no": number, "first_response_s": None, "total_s": None,
            "file": None, "error": None}
     request_id = None
     t0 = time.perf_counter()
     try:
-        result, request_id, first = run_queue(endpoint, body, headers, key)
+        result, request_id, first = run_queue(endpoint, body, headers, key, state)
         row["first_response_s"] = round(first, 3)
         audio = result.get("audio")
         if not isinstance(audio, dict) or not audio.get("url"):
@@ -450,54 +485,36 @@ def synth_one(model, endpoint, body, headers, key, out_dir, number):
     except StepError as e:
         row["error"] = e.code
         request_id = request_id or getattr(e, "request_id", None)
+    except KeyboardInterrupt:
+        row["error"] = "INTERRUPTED"
+        raise
+    except Exception as e:
+        row["error"] = exc_code(e)
+    finally:
+        report["results"].append(row)
     if request_id:
         delete_payloads(request_id, key)
-    return row
+        discard_id(state, request_id)
+    print_row(row)
 
 
-def run_all(ref_data_uri, ref_text, sentences, key, out_dir):
-    headers = build_headers(key)
-    results = []
-    qwen_clone_s = None
-    qwen_clone_error = None
+def discard_id(state, request_id):
+    if request_id in state["ids"]:
+        state["ids"].remove(request_id)
 
-    # Qwen 1단계: 복제 (1회). 임베딩 파일은 2단계에서 쓰므로 삭제는 마지막에 한다.
-    clone_request_id = None
-    embedding_url = None
-    try:
-        result, clone_request_id, first = run_queue(
-            QWEN_CLONE_ENDPOINT, build_qwen_clone_body(ref_data_uri, ref_text), headers, key)
-        qwen_clone_s = round(first, 3)
-        emb = result.get("speaker_embedding")
-        if not isinstance(emb, dict) or not emb.get("url"):
-            raise StepError("NO_EMBEDDING_URL")
-        embedding_url = emb["url"]
-    except StepError as e:
-        qwen_clone_error = e.code
-        clone_request_id = clone_request_id or getattr(e, "request_id", None)
-    print("%s 복제 단계: %s" % (MODEL_QWEN, ("%.3f초" % qwen_clone_s) if qwen_clone_s is not None
-                              else "실패(%s)" % qwen_clone_error))
 
-    for i, text in enumerate(sentences, 1):
-        if embedding_url:
-            row = synth_one(MODEL_QWEN, QWEN_TTS_ENDPOINT,
-                            build_qwen_tts_body(text, embedding_url, ref_text),
-                            headers, key, out_dir, i)
-        else:
-            row = {"model": MODEL_QWEN, "sentence_no": i, "first_response_s": None, "total_s": None,
-                   "file": None, "error": "CLONE_FAILED"}
-        results.append(row)
-        print_row(row)
+def cleanup(state, key):
+    """아직 지우지 못한 request_id 전부에 삭제를 시도한다 (실패는 경고만). 예외가 나도 멈추지 않는다."""
+    for request_id in list(state["ids"]):
+        try:
+            delete_payloads(request_id, key)
+        except Exception:
+            print("경고: 지우지 못함(ERROR): 결과 파일은 보관 기간 설정(%d초)에만 의존" % LIFECYCLE_EXPIRATION_SECONDS,
+                  file=sys.stderr)
+        discard_id(state, request_id)
 
-    if clone_request_id:
-        delete_payloads(clone_request_id, key)
 
-    for i, text in enumerate(sentences, 1):
-        row = synth_one(MODEL_CHATTERBOX, CHATTERBOX_ENDPOINT,
-                        build_chatterbox_body(text, ref_data_uri), headers, key, out_dir, i)
-        results.append(row)
-        print_row(row)
-
+def new_report():
     return {
         "schema": 1,
         "latency_definition": {
@@ -505,10 +522,50 @@ def run_all(ref_data_uri, ref_text, sentences, key, out_dir):
             "total_s": "큐 제출 직전부터 음성 파일을 다 내려받을 때까지",
             "qwen_clone_s": "Qwen 복제 1단계의 제출부터 결과 JSON 까지(1회). Qwen 문장별 값은 합성 2단계만의 시간",
         },
-        "qwen_clone_s": qwen_clone_s,
-        "qwen_clone_error": qwen_clone_error,
-        "results": results,
+        "qwen_clone_s": None,
+        "qwen_clone_error": None,
+        "aborted": None,  # 중간에 멈췄으면 INTERRUPTED 또는 오류 코드
+        "results": [],
     }
+
+
+def run_all(ref_data_uri, ref_text, sentences, key, out_dir, report, state):
+    """모든 호출을 실행한다. 결과는 report 에 쌓이므로 중간에 예외가 나도 그때까지의 것이 남는다."""
+    headers = build_headers(key)
+
+    # Qwen 1단계: 복제 (1회). 임베딩 파일은 2단계에서 쓰므로 삭제는 마지막(cleanup)에 한다.
+    embedding_url = None
+    try:
+        result, _, first = run_queue(
+            QWEN_CLONE_ENDPOINT, build_qwen_clone_body(ref_data_uri, ref_text), headers, key, state)
+        report["qwen_clone_s"] = round(first, 3)
+        emb = result.get("speaker_embedding")
+        if not isinstance(emb, dict) or not emb.get("url"):
+            raise StepError("NO_EMBEDDING_URL")
+        embedding_url = emb["url"]
+    except StepError as e:
+        report["qwen_clone_error"] = e.code
+    except Exception as e:
+        report["qwen_clone_error"] = exc_code(e)
+    print("%s 복제 단계: %s" % (MODEL_QWEN, ("%.3f초" % report["qwen_clone_s"]) if report["qwen_clone_s"] is not None
+                              else "실패(%s)" % report["qwen_clone_error"]))
+
+    for i, text in enumerate(sentences, 1):
+        if embedding_url:
+            synth_one(MODEL_QWEN, QWEN_TTS_ENDPOINT,
+                      build_qwen_tts_body(text, embedding_url, ref_text),
+                      headers, key, out_dir, i, report, state)
+        else:
+            row = {"model": MODEL_QWEN, "sentence_no": i, "first_response_s": None, "total_s": None,
+                   "file": None, "error": "CLONE_FAILED"}
+            report["results"].append(row)
+            print_row(row)
+
+    cleanup(state, key)  # Qwen 복제 결과(임베딩 파일) 삭제
+
+    for i, text in enumerate(sentences, 1):
+        synth_one(MODEL_CHATTERBOX, CHATTERBOX_ENDPOINT,
+                  build_chatterbox_body(text, ref_data_uri), headers, key, out_dir, i, report, state)
 
 
 def print_row(row):
@@ -541,12 +598,34 @@ def main(argv=None):
         return EXIT_OK
 
     os.makedirs(args.out, exist_ok=True)
-    report = run_all(data_uri, ref_text, sentences, key, args.out)
-    with open(os.path.join(args.out, "results.json"), "w", encoding="utf-8") as f:
-        json.dump(report, f, ensure_ascii=False, indent=2)
-    failed = any(r["error"] for r in report["results"]) or report["qwen_clone_error"]
-    print("results.json 저장: %s" % os.path.join(args.out, "results.json"))
-    return EXIT_RUN_FAILED if failed else EXIT_OK
+    report = new_report()
+    state = {"ids": []}  # 받은 request_id 중 아직 삭제하지 못한 것
+    code = EXIT_OK
+    try:
+        run_all(data_uri, ref_text, sentences, key, args.out, report, state)
+    except KeyboardInterrupt:
+        report["aborted"] = "INTERRUPTED"
+        code = EXIT_INTERRUPTED
+        print("중단됨: 정리와 저장을 시도합니다.", file=sys.stderr)
+    except Exception as e:
+        report["aborted"] = exc_code(e)
+        code = EXIT_RUN_FAILED
+        print("실행 중 오류(%s): 정리와 저장을 시도합니다." % report["aborted"], file=sys.stderr)
+    finally:
+        try:
+            cleanup(state, key)
+        except BaseException:
+            pass  # 정리 중 중단돼도 저장은 시도한다
+        path = os.path.join(args.out, "results.json")
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(report, f, ensure_ascii=False, indent=2)
+            print("results.json 저장: %s" % path)
+        except OSError:
+            print("경고: results.json 을 저장하지 못했습니다.", file=sys.stderr)
+    if code == EXIT_OK and (any(r["error"] for r in report["results"]) or report["qwen_clone_error"]):
+        code = EXIT_RUN_FAILED
+    return code
 
 
 if __name__ == "__main__":
