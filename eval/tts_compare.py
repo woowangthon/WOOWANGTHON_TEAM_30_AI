@@ -225,16 +225,32 @@ def audio_to_data_uri(path):
     return "data:%s;base64,%s" % (mime, base64.b64encode(raw).decode("ascii"))
 
 
-def build_headers(key):
-    """모든 fal 요청에 붙는 헤더. 개인정보 설정 포함. 키는 호출하는 쪽에서만 넣는다."""
-    h = {
-        "Content-Type": "application/json",
+def build_privacy_headers():
+    """개인정보 설정 헤더. 제출·상태·결과 요청에 붙는다 (삭제·취소 요청에는 붙이지 않는다)."""
+    return {
         STORE_IO_HEADER[0]: STORE_IO_HEADER[1],
         LIFECYCLE_HEADER_NAME: json.dumps({"expiration_duration_seconds": LIFECYCLE_EXPIRATION_SECONDS}),
-        START_TIMEOUT_HEADER_NAME: str(START_TIMEOUT_SECONDS),
     }
+
+
+def build_auth_headers(key):
+    """삭제·취소 요청용: Authorization 만."""
+    return {"Authorization": "%s %s" % (AUTH_SCHEME, key)}
+
+
+def build_headers(key):
+    """큐 제출 요청 헤더: 개인정보 설정 + 시작 대기 제한 + 본문 형식 (+ 키가 있으면 Authorization)."""
+    h = {"Content-Type": "application/json", START_TIMEOUT_HEADER_NAME: str(START_TIMEOUT_SECONDS)}
+    h.update(build_privacy_headers())
     if key:
-        h["Authorization"] = "%s %s" % (AUTH_SCHEME, key)
+        h.update(build_auth_headers(key))
+    return h
+
+
+def build_query_headers(key):
+    """상태·결과 조회(GET) 요청 헤더: 개인정보 설정 + Authorization."""
+    h = build_privacy_headers()
+    h.update(build_auth_headers(key))
     return h
 
 
@@ -268,7 +284,9 @@ def describe_plan():
     ]
     lines = ["[dry-run] 호출하지 않습니다. 요청 본문은 필드 이름만 표시합니다.",
              "큐 제출 주소: %s<endpoint_id>" % QUEUE_BASE,
-             "요청 헤더 이름: " + ", ".join(headers),
+             "제출 요청 헤더 이름: " + ", ".join(headers),
+             "상태·결과 조회 헤더 이름: " + ", ".join(sorted(build_query_headers("x").keys())),
+             "취소(PUT cancel_url)·삭제 요청 헤더 이름: Authorization",
              "참조 음성: data URI 로 요청 본문에 직접 싣습니다 (fal CDN 에 올리지 않음).",
              "끝난 요청마다 삭제 API 호출: DELETE " + DELETE_URL, ""]
     for name, endpoint, fields, count in steps:
@@ -313,9 +331,9 @@ def safe_code(text, fallback="UNKNOWN"):
     return cleaned or fallback
 
 
-def run_queue(endpoint, body, headers):
+def run_queue(endpoint, body, headers, key):
     """큐 방식 호출. (결과 JSON, request_id, 첫 응답까지 초)를 돌려준다. 실패 시 StepError(code) 이며
-    request_id 를 알고 있으면 e.request_id 에 담는다."""
+    request_id 를 알고 있으면 e.request_id 에 담는다. 완료 전에 시간 초과·오류로 끝나면 cancel_url 로 취소를 시도한다."""
     t0 = time.perf_counter()
     status, raw, _ = http_call("POST", QUEUE_BASE + endpoint, headers, body)
     sub = parse_json(raw)
@@ -323,32 +341,55 @@ def run_queue(endpoint, body, headers):
         raise StepError("HTTP_%d" % status)
     request_id = sub.get("request_id")
     status_url, response_url = sub.get("status_url"), sub.get("response_url")
+    cancel_url = sub.get("cancel_url")
     if not (request_id and status_url and response_url):
         raise StepError("BAD_SUBMIT_RESPONSE")
-    auth_only = {"Authorization": headers["Authorization"]}
+    query_headers = build_query_headers(key)
+    completed = False
     try:
         deadline = t0 + POLL_TIMEOUT_S
         while True:
-            s_code, s_raw, _ = http_call("GET", status_url, auth_only)
+            s_code, s_raw, _ = http_call("GET", status_url, query_headers)
             s_json = parse_json(s_raw)
             if s_code not in (200, 202) or not isinstance(s_json, dict):
                 raise StepError("HTTP_%d" % s_code)
+            if s_json.get("error"):  # 실패 응답 필드 error/error_type 이 값으로 있으면 바로 끝낸다
+                raise StepError("FAL_" + safe_code(s_json.get("error_type")))
             if s_json.get("status") == STATUS_COMPLETED:
+                completed = True
                 break
             if time.perf_counter() > deadline:
                 raise StepError("TIMEOUT")
             time.sleep(POLL_INTERVAL_S)
-        r_code, r_raw, _ = http_call("GET", response_url, auth_only)
+        r_code, r_raw, _ = http_call("GET", response_url, query_headers)
         result = parse_json(r_raw)
         first = time.perf_counter() - t0
         if r_code != 200 or not isinstance(result, dict):
             raise StepError("HTTP_%d" % r_code)
-        if "error" in result:
+        if result.get("error"):  # null·빈 값이면 실패로 보지 않는다
             raise StepError("FAL_" + safe_code(result.get("error_type")))
     except StepError as e:
         e.request_id = request_id
+        if not completed:
+            cancel_request(cancel_url, key)
         raise
     return result, request_id, first
+
+
+def cancel_request(cancel_url, key):
+    """끝나지 않은 요청 취소: PUT cancel_url (Authorization 만). 실패는 경고만 하고 계속한다."""
+    if not cancel_url:
+        print("경고: 취소 주소가 없어 취소하지 못함.", file=sys.stderr)
+        return False
+    try:
+        code, _, _ = http_call("PUT", cancel_url, build_auth_headers(key))
+    except StepError:
+        print("경고: 취소 호출 실패(NETWORK).", file=sys.stderr)
+        return False
+    if code != 200:
+        print("경고: 취소 호출 실패(HTTP_%d)." % code, file=sys.stderr)
+        return False
+    return True
 
 
 def download(url):
@@ -361,17 +402,16 @@ def download(url):
 
 
 def delete_payloads(request_id, key):
-    """요청 결과(CDN 파일 등) 삭제. 실패는 경고만 출력하고 계속한다."""
+    """요청 결과(CDN 파일 등) 삭제 (Authorization 만). 끝나지 않은 요청은 문서상 400 이다. 실패는 경고만 하고 계속한다."""
     url = DELETE_URL.format(request_id=request_id)
+    warn = "경고: 지우지 못함(%s): 결과 파일은 보관 기간 설정(" + str(LIFECYCLE_EXPIRATION_SECONDS) + "초)에만 의존"
     try:
-        code, _, _ = http_call("DELETE", url, {"Authorization": "%s %s" % (AUTH_SCHEME, key)})
+        code, _, _ = http_call("DELETE", url, build_auth_headers(key))
     except StepError:
-        print("경고: 삭제 호출 실패(NETWORK). 보관 기간(%d초) 뒤 만료됩니다." % LIFECYCLE_EXPIRATION_SECONDS,
-              file=sys.stderr)
+        print(warn % "NETWORK", file=sys.stderr)
         return False
     if code != 200:
-        print("경고: 삭제 호출 실패(HTTP_%d). 보관 기간(%d초) 뒤 만료됩니다." % (code, LIFECYCLE_EXPIRATION_SECONDS),
-              file=sys.stderr)
+        print(warn % ("HTTP_%d" % code), file=sys.stderr)
         return False
     return True
 
@@ -396,7 +436,7 @@ def synth_one(model, endpoint, body, headers, key, out_dir, number):
     request_id = None
     t0 = time.perf_counter()
     try:
-        result, request_id, first = run_queue(endpoint, body, headers)
+        result, request_id, first = run_queue(endpoint, body, headers, key)
         row["first_response_s"] = round(first, 3)
         audio = result.get("audio")
         if not isinstance(audio, dict) or not audio.get("url"):
@@ -426,7 +466,7 @@ def run_all(ref_data_uri, ref_text, sentences, key, out_dir):
     embedding_url = None
     try:
         result, clone_request_id, first = run_queue(
-            QWEN_CLONE_ENDPOINT, build_qwen_clone_body(ref_data_uri, ref_text), headers)
+            QWEN_CLONE_ENDPOINT, build_qwen_clone_body(ref_data_uri, ref_text), headers, key)
         qwen_clone_s = round(first, 3)
         emb = result.get("speaker_embedding")
         if not isinstance(emb, dict) or not emb.get("url"):

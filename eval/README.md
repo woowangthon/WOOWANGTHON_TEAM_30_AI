@@ -14,7 +14,7 @@
 
 ### NOVA 음성 합성은 비교에서 뺐습니다
 
-충북대 NOVA 게이트웨이의 음성 합성은 **음성 복제가 안 돼서** 그분 목소리 합성(가)에는 쓸 수 없고, 비교 대상에서 뺐습니다.
+충북대 NOVA 게이트웨이의 음성 합성 문서에는 **정해진 목소리 목록만 있고 음성 복제(사용자 목소리 등록) 기능이 없어서**, 그분 목소리 합성(가)에 쓸 수 없다고 보고 비교 대상에서 뺐습니다.
 근거는 문서입니다. 문서(<https://docs.mindlogic.ai/docs/general/api-gateway/reference/audio-tts.md>)에는 정해진 목소리 목록만 있고 복제·사용자 목소리 등록에 대한 언급이 없습니다. (문서가 "복제 불가"라고 직접 말한 것은 아니고, 그 기능이 문서에 없습니다.)
 NOVA 음성 합성은 (나) 여운 안내 목소리(정해진 목소리로 안내 문장 읽기)에 씁니다. 이 도구는 NOVA 를 호출하지 않고 NOVA 키도 쓰지 않습니다.
 
@@ -120,12 +120,19 @@ fal 로 나가는 것: **참조 음성(본인 녹음), 참조 자막, 시험 문
 | 끝난 뒤 삭제 API (`DELETE https://api.fal.ai/v1/models/requests/{request_id}/payloads`) | 생성 파일(합성 음성, Qwen 목소리 정보 파일)을 지움. Qwen 복제 결과는 2단계가 쓰므로 문장 5개를 모두 합성한 뒤 지움 | <https://fal.ai/docs/platform-apis/v1/models/requests/payloads> |
 | `enable_safety_checker` 등 | 건드리지 않고 기본값 그대로 | 두 모델 API 페이지 |
 
-삭제가 실패하면 경고만 출력하고 계속합니다(보관 기간이 지나면 만료됩니다). 헤더는 모든 요청에 붙고, 인증 헤더는 `Authorization: Key <키>` 입니다(<https://fal.ai/docs/model-apis/authentication>). 키는 환경변수 `YEOUN_FAL_API_KEY` 에서만 읽고 어디에도 저장·출력하지 않습니다.
+헤더는 요청 종류별로 다릅니다. 큐 제출에는 개인정보 설정 두 헤더(`X-Fal-Store-IO`, `X-Fal-Object-Lifecycle-Preference`), `X-Fal-Request-Start-Timeout`, `Authorization` 을 붙입니다. 상태·결과 조회(GET)에는 개인정보 설정 두 헤더와 `Authorization` 을 붙입니다. 취소(PUT `cancel_url`)와 삭제 요청에는 `Authorization` 만 붙입니다. 인증 헤더는 `Authorization: Key <키>` 입니다(<https://fal.ai/docs/model-apis/authentication>). 키는 환경변수 `YEOUN_FAL_API_KEY` 에서만 읽고 어디에도 저장·출력하지 않습니다.
+
+### fal 에 남는 것 (한계)
+
+- 시간 초과(600초)나 오류로 끝나면 `cancel_url` 로 취소(PUT)를 시도한 뒤 삭제 API 를 시도합니다. 문서상 끝나지 않은 요청의 삭제는 400 이므로 삭제가 안 될 수 있고, 그 경우 "지우지 못함: 결과 파일은 보관 기간 설정(3600초)에만 의존" 경고만 내고 계속합니다. 이때 fal 에 남은 결과 파일은 보관 기간 헤더(3600초)에만 의존해 지워집니다. 취소·삭제가 이 경우 실제로 어떻게 동작하는지는 미확인입니다.
+- 삭제 API 는 생성 파일(CDN)만 지웁니다. 요청 기록의 JSON 입출력은 `X-Fal-Store-IO: 0` 에 의존합니다(적용 범위 미확인).
 
 ## 미확인 항목
 
 문서에서 확인하지 못했거나 실제 호출로 확인하지 못한 것입니다. 실제 실행 때 확인합니다.
 
+- 취소(PUT `cancel_url`)와 끝나지 않은 요청의 삭제가 실제로 어떻게 동작하는지 미확인.
+- 상태 응답에 실패 필드(`error`)가 값으로 들어오는 경우의 실제 모양 미확인(문서의 실패 응답 필드를 그대로 가정).
 - **실제 fal 호출 전체**: 이 컴퓨터에 키가 없어 한 번도 호출하지 못했습니다. 아래 항목과 별개로 응답 형식·지연은 실행해 봐야 압니다.
 - 하위 경로가 있는 endpoint_id(`fal-ai/qwen-3-tts/clone-voice/1.7b` 등)를 큐 제출 주소에 그대로 붙이는 방식은 문서 예시 기준이며 실제 호출로는 미확인.
 - `X-Fal-Object-Lifecycle-Preference` 로 줄 수 있는 최소 보관 시간 미확인(문서 예시값 3600초 사용).
